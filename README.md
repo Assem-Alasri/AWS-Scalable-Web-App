@@ -352,6 +352,7 @@ For private connectivity, create Interface VPC Endpoints in the VPC for the requ
 com.amazonaws.<region>.ssm
 com.amazonaws.<region>.ssmmessages
 com.amazonaws.<region>.ec2messages  # only where required by the Region/agent/feature combination
+```
 ---
 
 ## 10. Monitoring, Logging and Alerting
@@ -451,6 +452,8 @@ aws-scalable-web-app/
     ├── architecture.png
     ├── architecture-reference.svg
     ├── architecture-reference.png
+```
+---
 
 ## 16. Cost and Production Notes
 
