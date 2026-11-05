@@ -12,6 +12,51 @@ A production-oriented reference architecture for deploying a scalable web applic
 
 ---
 
+## Table of Contents
+
+- [1. Solution Architecture](#1-solution-architecture)
+  - [Architecture Goals](#architecture-goals)
+  - [Key Design Choices and Diagram Clarifications](#key-design-choices-and-diagram-clarifications)
+- [2. AWS Services and Responsibilities](#2-aws-services-and-responsibilities)
+- [3. Network Design](#3-network-design)
+  - [VPC and Subnet CIDR Plan](#vpc-and-subnet-cidr-plan)
+  - [Route Table Design](#route-table-design)
+  - [NAT Gateway Strategy](#nat-gateway-strategy)
+  - [Network Security Boundaries](#network-security-boundaries)
+- [4. Request and Data Flow](#4-request-and-data-flow)
+  - [4.1 DNS and Viewer Connection](#41-dns-and-viewer-connection)
+  - [4.2 Static Asset Request](#42-static-asset-request)
+  - [4.3 Dynamic Application/API Request](#43-dynamic-applicationapi-request)
+  - [4.4 Database Traffic](#44-database-traffic)
+- [5. ALB, Target Groups and Health Checks](#5-alb-target-groups-and-health-checks)
+- [6. EC2 Auto Scaling Design](#6-ec2-auto-scaling-design)
+  - [Launch Template Baseline](#launch-template-baseline)
+  - [Scaling Policy](#scaling-policy)
+  - [Application Requirements for Horizontal Scaling](#application-requirements-for-horizontal-scaling)
+- [7. RDS Multi-AZ Database Design](#7-rds-multi-az-database-design)
+  - [Normal Operation](#normal-operation)
+  - [Failover Operation](#failover-operation)
+  - [Database Protection](#database-protection)
+- [8. Security Architecture](#8-security-architecture)
+  - [Security Group Rule Matrix](#security-group-rule-matrix)
+  - [Prevent Direct-Origin Bypass](#prevent-direct-origin-bypass)
+  - [AWS WAF Rules](#aws-waf-rules)
+  - [Encryption and Identity](#encryption-and-identity)
+- [9. Systems Manager Administration](#9-systems-manager-administration)
+- [10. Monitoring, Logging and Alerting](#10-monitoring-logging-and-alerting)
+  - [CloudWatch Metrics to Monitor](#cloudwatch-metrics-to-monitor)
+- [11. Failure Scenarios and Recovery Expectations](#11-failure-scenarios-and-recovery-expectations)
+- [12. Alternative DNS Topology if Route 53 Must Point to ALB](#12-alternative-dns-topology-if-route-53-must-point-to-alb)
+- [13. Deployment Sequence](#13-deployment-sequence)
+- [14. Acceptance Checklist](#14-acceptance-checklist)
+- [15. Repository Structure](#15-repository-structure)
+- [16. Cost and Production Notes](#16-cost-and-production-notes)
+- [17. Official AWS References](#17-official-aws-references)
+- [18. Publish to GitHub](#18-publish-to-github)
+- [Project Status](#project-status)
+
+---
+
 ## 1. Solution Architecture
 
 The recommended request path is:
@@ -20,11 +65,14 @@ The recommended request path is:
 
 Static files use a separate private S3 origin behind CloudFront. This gives the distribution two origins: S3 for cacheable static assets and the ALB for dynamic application/API requests.
 
+## Solution Architecture
+![Open the scalable architecture diagram (SVG)](docs/architecture-reference.svg)
+
+## Original Project Diagram
 ![AWS Scalable Web Application reference architecture](docs/architecture.png)
 
-- [Open the scalable architecture diagram (SVG)](docs/architecture.svg)
 - [View the original project diagram](docs/architecture-reference.png)
-- [View the diagram-generation source](docs/draw_architecture.py)
+
 
 ### Architecture goals
 
@@ -310,165 +358,3 @@ For private connectivity, create Interface VPC Endpoints in the VPC for the requ
 com.amazonaws.<region>.ssm
 com.amazonaws.<region>.ssmmessages
 com.amazonaws.<region>.ec2messages  # only where required by the Region/agent/feature combination
-```
-
-Place endpoint ENIs in multiple AZs for endpoint-path resilience. Allow TCP 443 from the application instances' security group to the endpoint security group. Depending on enabled features, additional endpoints or egress may be needed for KMS, CloudWatch Logs, S3, and other AWS services. Confirm endpoint requirements for the selected Region and SSM Agent version.
-
----
-
-## 10. Monitoring, Logging and Alerting
-
-### CloudWatch metrics to monitor
-
-| Service | Useful metrics/signals |
-|---|---|
-| ALB | `HTTPCode_ELB_5XX_Count`, `HTTPCode_Target_5XX_Count`, `TargetResponseTime`, `HealthyHostCount`, `UnHealthyHostCount`, `RequestCount` |
-| EC2 | `CPUUtilization`; memory and disk through CloudWatch Agent; application/system logs |
-| Auto Scaling | Desired, InService and Pending instance counts; scaling activities |
-| RDS | `CPUUtilization`, `DatabaseConnections`, `FreeStorageSpace`, read/write latency, RDS events |
-| CloudFront | Requests, bytes downloaded, 4xx/5xx error rates, cache hit ratio |
-| WAF | Allowed/blocked requests by rule, sampled requests and WAF logs |
-
-Create CloudWatch dashboards for the end-to-end service and alarms for sustained high error rates, unhealthy targets, insufficient ASG capacity, high latency, RDS storage/connection pressure, and unexpected WAF blocks. Use CloudWatch Agent for guest OS metrics that are not emitted by default (such as memory and filesystem utilization).
-
-CloudWatch Alarm actions publish to an SNS topic. Subscribe the operations team through email, SMS, or an approved HTTPS endpoint. Verify subscriptions and perform an end-to-end alarm test; creating an SNS topic alone does not prove notifications work.
-
----
-
-## 11. Failure Scenarios and Recovery Expectations
-
-| Failure scenario | Expected behavior / validation |
-|---|---|
-| One EC2 instance becomes unhealthy | ALB stops routing new requests to it; ASG replaces it when health checks report it unhealthy |
-| AZ-A application capacity is unavailable | ALB routes to healthy targets in AZ-B; AZ-B must have enough capacity for the expected failover load |
-| Traffic spike | Target Tracking scales the ASG out; new targets receive traffic after passing health checks |
-| Primary RDS instance fails | RDS promotes the standby; application reconnects through the same writer endpoint |
-| NAT Gateway A/AZ-A outage | AZ-B instances continue to use NAT Gateway B; AZ-A egress is impaired until recovered |
-| CloudFront cache miss | Request goes to the appropriate origin (S3 or ALB) |
-| WAF false positive | Review sampled/logged request, tune rule, and retest without broadly disabling protection |
-| RDS data corruption or accidental deletion | Restore from automated backup/PITR or snapshot; Multi-AZ alone does not provide point-in-time recovery |
-
-Define service-specific **RTO** and **RPO** targets before production. Multi-AZ within one Region does not protect against every Region-wide outage; cross-Region disaster recovery requires a separate design and testing plan.
-
----
-
-## 12. Alternative DNS Topology if Route 53 Must Point to ALB
-
-Some project briefs require a Route 53 Alias record directly to the ALB while also requesting CloudFront caching. In that case, use two hostnames:
-
-- `app.example.com` → Route 53 Alias → ALB for dynamic application requests.
-- `static.example.com` → Route 53 Alias → CloudFront → private S3 origin (OAC) for static assets.
-
-This satisfies a literal Route 53-to-ALB requirement, but the application hostname does not receive CloudFront edge protection/caching unless application traffic is also routed through CloudFront. Do not configure a CloudFront distribution and a direct ALB DNS record and assume all user traffic traverses CloudFront.
-
-For the recommended single-hostname topology in this repository, use Route 53 Alias → CloudFront. Route 53 CloudFront Alias records do not support `EvaluateTargetHealth`; leave it disabled as documented by AWS. If DNS-level failover is required, design and test explicit health checks and routing policies rather than relying on the Alias setting alone.
-
----
-
-## 13. Deployment Sequence
-
-A safe implementation sequence is:
-
-1. **Plan:** select Region, domain, CIDR ranges, database engine, instance family, environment names, RTO/RPO and cost ceiling.
-2. **Network:** create VPC, two AZs, six subnets, route tables, IGW, NAT Gateways and VPC endpoints.
-3. **Security foundation:** create security groups, NACL policy, KMS keys, IAM roles and Secrets Manager secret.
-4. **Database:** create DB subnet group, encrypted RDS Multi-AZ database, parameter/option settings, backup retention and DB security group.
-5. **Application image:** build and test the application AMI or bootstrap artifact; install SSM Agent and CloudWatch Agent.
-6. **Compute:** create Launch Template and ASG across both private app subnets.
-7. **Load balancing:** create ALB, HTTPS listener, target group and readiness health check; validate target registration.
-8. **Edge and security:** create private S3 bucket, OAC, CloudFront origins/behaviors, CloudFront Web ACL and ALB-origin restrictions.
-9. **DNS and TLS:** create ACM certificates in the required Regions and Route 53 A/AAAA Alias records.
-10. **Operations:** configure CloudWatch dashboards/alarms, SNS subscriptions, SSM session logging and CloudTrail.
-11. **Validation:** run application, security, load, AZ-failure, RDS failover, backup-restore and notification tests.
-
----
-
-## 14. Acceptance Checklist
-
-- [ ] VPC and all six subnets deployed across two AZs with non-overlapping CIDRs.
-- [ ] Public route tables route to the IGW; each private app subnet routes to its same-AZ NAT Gateway.
-- [ ] Database subnets have no general internet route.
-- [ ] ALB is enabled in both public subnets and targets only private EC2 instances.
-- [ ] EC2 instances have no public IP and are managed by an ASG spanning both AZs.
-- [ ] Target group health checks and ASG ELB health checks are verified.
-- [ ] CloudFront static behavior uses S3 OAC; dynamic behavior uses the ALB origin.
-- [ ] Authenticated/personalized paths are not cached unintentionally.
-- [ ] WAF is associated with CloudFront and the intended rules are tested.
-- [ ] ALB origin access is restricted to CloudFront and direct requests are denied.
-- [ ] RDS is private, encrypted, Multi-AZ, backed up, and recoverable through a tested restore.
-- [ ] Application reconnect behavior is tested during RDS failover.
-- [ ] Session Manager works without opening inbound SSH.
-- [ ] CloudWatch dashboards and alarms are verified; SNS notifications are received.
-- [ ] Load, scale-out/scale-in, single-instance loss, AZ loss, and database recovery tests are recorded.
-
----
-
-## 15. Repository Structure
-
-```text
-aws-scalable-web-app/
-├── README.md
-├── README.ar.md
-├── .gitignore
-└── docs/
-    ├── architecture.png
-    ├── architecture.svg
-    ├── architecture-reference.png
-    ├── draw_architecture.py
-    └── requirements.txt
-```
-
-`architecture.png` and `architecture.svg` are the revised reference diagrams. `architecture-reference.png` is the original diagram supplied with the project. The original has been retained for traceability; use the revised diagram as the canonical architecture because it shows the S3 static origin and clarifies the CloudFront/WAF relationship.
-
----
-
-## 16. Cost and Production Notes
-
-This is a high-availability architecture and includes billable resources even when traffic is low: two NAT Gateways, an ALB, EC2 instances, RDS Multi-AZ, CloudFront requests/transfer, S3 storage/requests, WAF, logs, endpoints, and data transfer. Produce a region-specific estimate with AWS Pricing Calculator before deployment. NAT Gateway processing and cross-AZ traffic can be material cost drivers; use VPC endpoints for eligible AWS service traffic where this makes economic and operational sense.
-
-Do not publish AWS account IDs, ARNs that expose internal naming, public IPs, real domain ownership details, secrets, private keys, Terraform state, environment files, or unredacted logs in this public repository.
-
----
-
-## 17. Official AWS References
-
-- [Route 53: Route traffic to a CloudFront distribution](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-to-cloudfront-distribution.html)
-- [CloudFront: Restrict access to an Amazon S3 origin with OAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
-- [CloudFront: Restrict access to an Application Load Balancer](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/restrict-access-to-load-balancer.html)
-- [AWS WAF: Resources that can be protected](https://docs.aws.amazon.com/waf/latest/developerguide/how-aws-waf-works-resources.html)
-- [Application Load Balancer: Create an ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html)
-- [EC2 Auto Scaling: Target tracking scaling policies](https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scaling-target-tracking.html)
-- [VPC: NAT Gateway basics and AZ resilience](https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html)
-- [RDS: Multi-AZ DB instance deployments](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZSingleStandby.html)
-- [RDS: Multi-AZ failover](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.Failover.html)
-- [RDS: Automated backups and point-in-time recovery](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.html)
-- [Systems Manager: VPC endpoints](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-create-vpc.html)
-- [Systems Manager: Session Manager with PrivateLink](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-getting-started-privatelink.html)
-
----
-
-## 18. Publish to GitHub
-
-1. Create an **empty public repository** on GitHub named `aws-scalable-web-app` (do not initialize it with another README or license).
-2. Extract this package and run the following commands from the project directory:
-
-```bash
-git init -b main
-git add .
-git commit -m "docs: add AWS scalable web app architecture"
-git remote add origin https://github.com/<GITHUB-USERNAME>/aws-scalable-web-app.git
-git push -u origin main
-```
-
-3. Open the repository page and confirm that `README.md` renders the architecture diagram.
-
-Replace `<GITHUB-USERNAME>` with your GitHub username. Choose and add a license only if you intend to grant reuse rights; this package intentionally does not assume a license.
-
-To regenerate the PNG after editing the diagram source, install the dependency from `docs/requirements.txt` and run `python docs/draw_architecture.py`.
-
----
-
-## Project Status
-
-**Current deliverable:** Architecture and documentation package.  
-**Next implementation milestone:** Provision the network foundation and database, then deploy the application tier and validate the end-to-end request path.
